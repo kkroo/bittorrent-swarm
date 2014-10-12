@@ -10,6 +10,8 @@ var portfinder = require('portfinder')
 var speedometer = require('speedometer')
 var thunky = require('thunky')
 var Wire = require('bittorrent-protocol')
+var peerid = require('bittorrent-peerid')
+var geoip = require('geoip-lite')
 
 // Use random port above 1024
 portfinder.basePort = Math.floor(Math.random() * 60000) + 1025
@@ -30,13 +32,15 @@ var getImplicitListenPort = thunky(function (cb) {
  * @param {string} addr
  */
 function Peer (addr) {
+  this.id = null
   this.addr = addr
 
   this.conn = null
   this.wire = null
-
+  this.handshaken = false
   this.timeout = null
   this.retries = 0
+  this.geodata = null
 }
 
 /**
@@ -65,6 +69,42 @@ Peer.prototype.onconnect = function (conn) {
   // Duplex streaming magic!
   conn.pipe(wire).pipe(conn)
 }
+
+
+Peer.prototype.toJSON = function() {
+  return {handshaken: this.handshaken,
+          addr: this.addr,
+          id: this.id ? peerid(this.id) : null,
+          downSpeed: ( this.wire ) ? this.wire.downloadSpeed() : 0,
+          upSpeed: ( this.wire ) ? this.wire.uploadSpeed() : 0,
+          geodata: this.geodata
+  }
+}
+
+Object.defineProperty(Peer.prototype, 'location', {
+  get: function () {
+    var self = this
+    var loc_string = ""
+    if (!self.geodata) return loc_string
+    if (self.geodata.city) loc_string += self.geodata.city
+    if (self.geodata.region && isNaN(self.geodata.region)) loc_string = (loc_string.length) ? loc_string + ', ' + self.geodata.region : self.geodata.region
+    loc_string = (loc_string.length) ? loc_string + ', ' + self.geodata.country : self.geodata.country
+    return loc_string
+  }
+})
+
+Object.defineProperty(Peer.prototype, 'client', {
+  get: function () {
+    var self = this
+    var ret_str = ""
+    if (!self.id) return ret_str
+    parsed = peerid(self.id)
+    if (parsed.client) ret_str += parsed.client
+    if (parsed.version) ret_str += ' ' + parsed.version
+    return ret_str
+  }
+})
+
 
 /**
  * Pool
@@ -166,6 +206,7 @@ Pool.prototype._onconn = function (conn) {
     if (!swarm)
       return conn.destroy()
 
+    peer.id = peerId
     swarm._onincoming(peer)
   }.bind(this))
 }
@@ -334,6 +375,8 @@ Swarm.prototype.addPeer = function (addr) {
   debug('addPeer %s', addr)
 
   var peer = new Peer(addr)
+  // Get geolocation
+  peer.geodata = geoip.lookup(addrToIPPort(addr)[0]);
   this._peers[addr] = peer
   this._queue.push(peer)
 
@@ -482,7 +525,8 @@ Swarm.prototype._drain = function () {
   conn.timeout = timeout
   this._connTimeouts.push(conn)
 
-  var onhandshake = function (infoHash) {
+  var onhandshake = function (infoHash, peerId, extensions) {
+    peer.id = peerId
     clearTimeout(timeout)
     this._connTimeouts.splice(this._connTimeouts.indexOf(conn), 1)
 
@@ -516,6 +560,8 @@ Swarm.prototype._drain = function () {
     }.bind(this))
 
     wire.handshake(this.infoHash, this.peerId, this.handshake)
+    this.emit('peer', peer)
+
   }.bind(this)
 
   conn.on('connect', onconnect)
@@ -561,6 +607,7 @@ Swarm.prototype._onwire = function (peer) {
   var wire = peer.wire
 
   peer.retries = 0
+  peer.handshaken = true
 
   // Track total bytes downloaded by the swarm
   wire.on('download', function (downloaded) {
