@@ -43,6 +43,9 @@ function Peer (addr) {
   this.geodata = null
 }
 
+inherits(Peer, EventEmitter)
+
+
 /**
  * Called once the peer's `conn` has connected (i.e. fired 'connect')
  * @param {Socket} conn
@@ -55,6 +58,8 @@ Peer.prototype.onconnect = function (conn) {
   var destroy = once(function () {
     this.conn.destroy()
     this.conn = null
+    this.handshaken = false
+    this.emit('destroy', this)
   }.bind(this))
 
   // Close the wire when the connection is destroyed
@@ -63,7 +68,9 @@ Peer.prototype.onconnect = function (conn) {
   conn.once('close', function () { wire.end() })
 
   wire.once('end', function () {
+    wire.emit('update', this)
     this.wire = null
+    this.handshaken = false
   }.bind(this))
 
   // Duplex streaming magic!
@@ -614,6 +621,7 @@ Swarm.prototype._onwire = function (peer) {
     this.downloaded += downloaded
     this.downloadSpeed(downloaded)
     this.emit('download', downloaded)
+    wire.emit('update', peer)
   }.bind(this))
 
   // Track total bytes uploaded by the swarm
@@ -621,11 +629,13 @@ Swarm.prototype._onwire = function (peer) {
     this.uploaded += uploaded
     this.uploadSpeed(uploaded)
     this.emit('upload', uploaded)
+    wire.emit('update', peer)
   }.bind(this))
 
   var cleanup = once(function () {
     this.wires.splice(this.wires.indexOf(wire), 1)
     conn.destroy()
+    wire.emit('update', peer)
   }.bind(this))
 
   wire.on('end', cleanup)
